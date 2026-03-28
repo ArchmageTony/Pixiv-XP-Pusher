@@ -146,7 +146,19 @@ class AIScorer:
                 max_tokens=1000
             )
             
-            content = response.choices[0].message.content.strip()
+            # 兼容流式与非流式返回：判断返回对象是否为异步迭代器
+            if hasattr(response, "__aiter__"):
+                # 流式返回：逐块拼接内容
+                full_content = ""
+                async for chunk in response:
+                    delta = chunk.choices[0].delta
+                    if delta.content:
+                        full_content += delta.content
+                content = full_content.strip()
+            else:
+                # 非流式返回：直接提取完整内容
+                content = response.choices[0].message.content.strip()
+            
             logger.info(f"AI 返回结果: {content}")
             
             # 解析 JSON
