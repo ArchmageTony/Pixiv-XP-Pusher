@@ -1646,11 +1646,12 @@ class TelegramNotifier(BaseNotifier):
         
         # 多页逻辑
         if illust.page_count > self.max_pages:
-            # 超过阈值：强制降级为封面模式
+            # 超过阈值：强制降级为封面模式(旧版失效)
             # 在 caption 之后追加“长篇内容”提示
+            # 超过阈值：发送前 max_pages 张（最多10张），而非仅封面
             long_caption = caption.replace("🎨", "📚 [长篇精选] 🎨")
-            long_caption += f"\n\n<i>(本作品共 {illust.page_count} 页，仅展示封面)</i>"
-            return await self._send_photo(illust, long_caption, keyboard, topic_id)
+            long_caption += f"\n\n<i>(本作品共 {illust.page_count} 页，展示前 {min(self.max_pages, 10)} 页)</i>"
+            return await self._send_media_group(illust, long_caption, keyboard, topic_id)
 
         if illust.page_count == 1 or self.multi_page_mode == "cover_link":
             # 单图或强制封面模式
