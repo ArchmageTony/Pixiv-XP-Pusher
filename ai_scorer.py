@@ -55,7 +55,7 @@ class AIScorer:
 {candidates}
 
 返回 JSON 数组，格式: [{{"id": 123, "score": 0.85}}]
-只返回 JSON，不要解释。根据标签与用户偏好的匹配程度评分。"""
+**重要：只返回 JSON，不要解释。根据标签与用户偏好的匹配程度评分。**"""
 
     def __init__(self, config: dict):
         """
@@ -147,6 +147,7 @@ class AIScorer:
             )
             
             content = response.choices[0].message.content.strip()
+            logger.info(f"AI 返回结果: {content}")
             
             # 解析 JSON
             # 尝试提取 JSON 数组
