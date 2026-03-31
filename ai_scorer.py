@@ -146,6 +146,9 @@ class AIScorer:
                 max_tokens=1000
             )
             
+            logger.info(f"AI 响应对象类型: {type(response)}")
+            logger.info(f"AI 响应原始内容: {response}")
+            
             # 兼容流式与非流式返回：判断返回对象是否为异步迭代器
             if hasattr(response, "__aiter__"):
                 # 流式返回：逐块拼接内容
