@@ -9,6 +9,7 @@ Prompt 设计参考:
 - 提供近期反馈历史（喜欢/不喜欢的标签）
 - 让 LLM 输出喜爱概率分数
 """
+from httpcore import stream
 import logging
 import json
 import asyncio
@@ -143,7 +144,8 @@ class AIScorer:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=1000
+                max_tokens=1000,
+                stream=True
             )
             
             logger.info(f"AI 响应对象类型: {type(response)}")
