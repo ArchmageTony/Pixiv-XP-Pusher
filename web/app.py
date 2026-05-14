@@ -208,13 +208,21 @@ async def gallery(request: Request, page: int = Query(1, ge=1), _=Depends(requir
 @app.get("/tags", response_class=HTMLResponse)
 async def tags_manage(request: Request, msg: Optional[str] = None, _=Depends(require_auth)):
     """Tag 管理页"""
+    def _blocked_tag_sort_key(tag: str) -> tuple[int, str]:
+        normalized = tag.casefold().strip()
+        if normalized[:1].isdigit():
+            return (0, normalized)
+        if normalized[:1].isalpha():
+            return (1, normalized)
+        return (2, normalized)
+
     xp_profile = await db.get_xp_profile()
     all_tags = sorted(
         ((tag, weight) for tag, weight in xp_profile.items() if weight > 0),
         key=lambda x: x[1],
         reverse=True,
     )
-    blocked_tags = sorted(await db.get_blocked_tags())
+    blocked_tags = sorted(await db.get_blocked_tags(), key=_blocked_tag_sort_key)
 
     return templates.TemplateResponse(
         request=request,
