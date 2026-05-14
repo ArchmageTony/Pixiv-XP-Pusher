@@ -209,7 +209,11 @@ async def gallery(request: Request, page: int = Query(1, ge=1), _=Depends(requir
 async def tags_manage(request: Request, msg: Optional[str] = None, _=Depends(require_auth)):
     """Tag 管理页"""
     xp_profile = await db.get_xp_profile()
-    all_tags = sorted(xp_profile.items(), key=lambda x: x[1], reverse=True)
+    all_tags = sorted(
+        ((tag, weight) for tag, weight in xp_profile.items() if weight > 0),
+        key=lambda x: x[1],
+        reverse=True,
+    )
     blocked_tags = sorted(await db.get_blocked_tags())
 
     return templates.TemplateResponse(
