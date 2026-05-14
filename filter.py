@@ -107,6 +107,7 @@ class ContentFilter:
         artist_boost: float = 0.3,  # 关注画师的匹配度加成
         min_create_days: int = 0,  # 过滤 N 天前的老图 (0=不过滤)
         r18_mode: bool = False,  # 涩涩模式：只推送 R-18
+        exclude_bookmarked: bool = True,  # 过滤已收藏作品（基于本地缓存）
         # === 新增：借鉴 X 算法的增强选项 ===
         author_diversity: Optional[dict] = None,  # 画师多样性衰减配置
         source_boost: Optional[dict] = None,  # 来源加成配置
@@ -126,6 +127,7 @@ class ContentFilter:
         self.artist_boost = artist_boost
         self.min_create_days = min_create_days
         self.r18_mode = r18_mode
+        self.exclude_bookmarked = exclude_bookmarked
         
         # 画师多样性衰减 (借鉴 X 算法 AuthorDiversityScorer)
         # 公式: multiplier(position) = (1.0 - floor) × decay^position + floor
@@ -164,7 +166,7 @@ class ContentFilter:
         """
         过滤管道
         
-        1. 去重（已推送）
+        1. 去重（已推送 + 已收藏）
         2. 时间过滤（老图片）
         3. 硬性过滤（R-18G、AI）
         4. 黑名单Tag
@@ -186,13 +188,24 @@ class ContentFilter:
         # 批量预加载已推送 ID (性能优化: O(n) -> O(1) 数据库查询)
         all_ids = [illust.id for illust in illusts]
         pushed_ids = await db.get_pushed_ids_batch(all_ids)
+
+        # 批量预加载已收藏 ID（复用本地 xp_bookmarks，不增加 API 调用）
+        bookmarked_ids = set()
+        if self.exclude_bookmarked and user_id > 0:
+            bookmarked_ids = await db.get_bookmarked_ids_batch(all_ids, user_id)
         
         result = []
         filtered_by_time = 0
+        filtered_by_bookmark = 0
         
         for illust in illusts:
             # 1. 去重 (使用预加载的集合)
             if illust.id in pushed_ids:
+                continue
+
+            # 1.1 排除已收藏（公开/私密收藏取决于 build_profile 的 include_private 配置）
+            if illust.id in bookmarked_ids:
+                filtered_by_bookmark += 1
                 continue
             
             # 2. 时间过滤
@@ -228,6 +241,8 @@ class ContentFilter:
         
         if filtered_by_time > 0:
             logger.debug(f"过滤 {filtered_by_time} 个超过 {self.min_create_days} 天的老图")
+        if filtered_by_bookmark > 0:
+            logger.debug(f"过滤 {filtered_by_bookmark} 个已收藏作品")
         
         # 去重（同批次内）
         seen_ids = set()

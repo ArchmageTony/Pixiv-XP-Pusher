@@ -645,6 +645,7 @@ async def main_task(config: dict, client: PixivClient, profiler: XPProfiler, not
             artist_boost=filter_cfg.get("artist_boost", 0.3),
             min_create_days=filter_cfg.get("min_create_days", 0),
             r18_mode=filter_cfg.get("r18_mode", False),
+            exclude_bookmarked=filter_cfg.get("exclude_bookmarked", True),
             # 新增：借鉴 X 算法的增强选项
             author_diversity=filter_cfg.get("author_diversity"),
             source_boost=filter_cfg.get("source_boost"),

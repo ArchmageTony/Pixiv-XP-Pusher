@@ -334,6 +334,24 @@ async def get_pushed_ids_batch(illust_ids: list[int]) -> set[int]:
         return {row[0] for row in rows}
 
 
+async def get_bookmarked_ids_batch(illust_ids: list[int], user_id: int) -> set[int]:
+    """
+    批量查询已收藏的作品 ID 集合 (基于 xp_bookmarks 本地缓存)
+    """
+    if not illust_ids or user_id <= 0:
+        return set()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        placeholders = ",".join("?" * len(illust_ids))
+        params = [user_id, *illust_ids]
+        cursor = await db.execute(
+            f"SELECT illust_id FROM xp_bookmarks WHERE user_id = ? AND illust_id IN ({placeholders})",
+            params
+        )
+        rows = await cursor.fetchall()
+        return {row[0] for row in rows}
+
+
 async def mark_pushed(illust_id: int, source: str):
     """记录推送"""
     async with aiosqlite.connect(DB_PATH) as db:

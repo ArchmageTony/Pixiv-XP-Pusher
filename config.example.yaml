@@ -103,6 +103,7 @@ filter:
     # 注意：此参数控制每次脚本运行时最多推送多少张
     # 如果您每小时运行一次，全天总量 = 24 * daily_limit
   exclude_ai: false # 过滤 AI 生成作品
+  exclude_bookmarked: true # 过滤已收藏作品（使用本地缓存，不增加 API 调用）
   max_per_artist: 3 # 单画师最多推送数
   artist_boost: 0.3 # 订阅画师加成
   min_create_days: 30 # 过滤 N 天前的作品
