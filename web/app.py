@@ -217,8 +217,9 @@ async def tags_manage(request: Request, msg: Optional[str] = None, _=Depends(req
         return (2, normalized)
 
     xp_profile = await db.get_xp_profile()
+    # 页面按两位小数展示分值，过滤掉显示为 0.00 的标签，避免“看起来没生效”
     all_tags = sorted(
-        ((tag, weight) for tag, weight in xp_profile.items() if weight > 0),
+        ((tag, weight) for tag, weight in xp_profile.items() if round(weight, 2) > 0),
         key=lambda x: x[1],
         reverse=True,
     )
