@@ -85,7 +85,11 @@ async def index(request: Request):
     if verify_session(request):
         return RedirectResponse("/dashboard")
     
-    return templates.TemplateResponse("login.html", {"request": request, "active_page": ""})
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={"request": request, "active_page": ""}
+    )
 
 
 @app.get("/setup", response_class=HTMLResponse)
@@ -95,7 +99,11 @@ async def setup_page(request: Request):
     if config.get("web", {}).get("password"):
         return RedirectResponse("/")
     
-    return templates.TemplateResponse("setup.html", {"request": request, "active_page": ""})
+    return templates.TemplateResponse(
+        request=request,
+        name="setup.html",
+        context={"request": request, "active_page": ""}
+    )
 
 
 @app.post("/setup")
@@ -160,13 +168,17 @@ async def dashboard(request: Request, _=Depends(require_auth)):
     else:
         like_rate = "0%"
     
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
-        "active_page": "dashboard",
-        "top_tags": top_tags,
-        "stats": stats,
-        "like_rate": like_rate
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="dashboard.html",
+        context={
+            "request": request,
+            "active_page": "dashboard",
+            "top_tags": top_tags,
+            "stats": stats,
+            "like_rate": like_rate
+        }
+    )
 
 
 @app.get("/gallery", response_class=HTMLResponse)
@@ -178,14 +190,18 @@ async def gallery(request: Request, page: int = Query(1, ge=1), _=Depends(requir
     # 获取推送历史
     items, total = await db.get_push_history_paginated(limit=limit, offset=offset)
     
-    return templates.TemplateResponse("gallery.html", {
-        "request": request,
-        "active_page": "gallery",
-        "items": items,
-        "total": total,
-        "page": page,
-        "limit": limit
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="gallery.html",
+        context={
+            "request": request,
+            "active_page": "gallery",
+            "items": items,
+            "total": total,
+            "page": page,
+            "limit": limit
+        }
+    )
 
 
 # ============ API 路由 ============
