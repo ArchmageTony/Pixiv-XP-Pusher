@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}画师管理 - Pixiv-XP-Pusher{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">🎨 画师黑名单管理</h2>
+    </div>
+
+    {% if msg %}
+    <p style="color: var(--text-secondary); margin-bottom: 1rem;">{{ msg }}</p>
+    {% endif %}
+
+    <form method="post" action="/artists/block" style="display: flex; gap: 0.75rem; margin-bottom: 1rem; flex-wrap: wrap;">
+        <input type="number" name="artist_id" placeholder="输入画师 ID" min="1" required>
+        <input type="text" name="artist_name" placeholder="画师名（可选）">
+        <button type="submit" class="btn">添加黑名单</button>
+    </form>
+
+    <h3 style="margin-bottom: 0.75rem; font-size: 1rem;">已屏蔽画师</h3>
+    {% if blocked_artists %}
+    <div class="tag-cloud">
+        {% for artist_id, artist_name in blocked_artists %}
+        <form method="post" action="/artists/unblock" style="display: inline-block;">
+            <input type="hidden" name="artist_id" value="{{ artist_id }}">
+            <button type="submit" class="tag" style="cursor: pointer; border: none;">
+                {{ artist_name }} ({{ artist_id }})
+                <span class="weight">解除</span>
+            </button>
+        </form>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p style="color: var(--text-secondary);">当前没有已屏蔽画师。</p>
+    {% endif %}
+</div>
+{% endblock %}

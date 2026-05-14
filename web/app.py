@@ -8,6 +8,7 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Form, Query, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -202,6 +203,97 @@ async def gallery(request: Request, page: int = Query(1, ge=1), _=Depends(requir
             "limit": limit
         }
     )
+
+
+@app.get("/tags", response_class=HTMLResponse)
+async def tags_manage(request: Request, msg: Optional[str] = None, _=Depends(require_auth)):
+    """Tag 管理页"""
+    xp_profile = await db.get_xp_profile()
+    all_tags = sorted(xp_profile.items(), key=lambda x: x[1], reverse=True)
+    blocked_tags = sorted(await db.get_blocked_tags())
+
+    return templates.TemplateResponse(
+        request=request,
+        name="tag_manage.html",
+        context={
+            "request": request,
+            "active_page": "tags",
+            "all_tags": all_tags,
+            "blocked_tags": blocked_tags,
+            "msg": msg,
+        },
+    )
+
+
+@app.post("/tags/block")
+async def block_tag_web(tag: str = Form(...), _=Depends(require_auth)):
+    """Web 添加 Tag 黑名单"""
+    normalized = tag.strip().lower()
+    if not normalized:
+        return RedirectResponse("/tags?msg=" + quote("标签不能为空"), status_code=303)
+
+    await db.block_tag(normalized)
+    return RedirectResponse("/tags?msg=" + quote(f"已添加屏蔽标签: {normalized}"), status_code=303)
+
+
+@app.post("/tags/unblock")
+async def unblock_tag_web(tag: str = Form(...), _=Depends(require_auth)):
+    """Web 解除 Tag 黑名单"""
+    normalized = tag.strip().lower()
+    if not normalized:
+        return RedirectResponse("/tags?msg=" + quote("标签不能为空"), status_code=303)
+
+    ok = await db.unblock_tag(normalized)
+    if ok:
+        return RedirectResponse("/tags?msg=" + quote(f"已解除屏蔽标签: {normalized}"), status_code=303)
+    return RedirectResponse("/tags?msg=" + quote(f"未找到标签: {normalized}"), status_code=303)
+
+
+@app.get("/artists", response_class=HTMLResponse)
+async def artists_manage(request: Request, msg: Optional[str] = None, _=Depends(require_auth)):
+    """画师黑名单管理页"""
+    blocked_artists = sorted(await db.get_blocked_artists(), key=lambda x: x[0])
+    return templates.TemplateResponse(
+        request=request,
+        name="artist_manage.html",
+        context={
+            "request": request,
+            "active_page": "artists",
+            "blocked_artists": blocked_artists,
+            "msg": msg,
+        },
+    )
+
+
+@app.post("/artists/block")
+async def block_artist_web(artist_id: str = Form(...), artist_name: str = Form(""), _=Depends(require_auth)):
+    """Web 添加画师黑名单"""
+    try:
+        parsed_artist_id = int(artist_id.strip())
+        if parsed_artist_id <= 0:
+            raise ValueError("artist_id must be positive")
+    except Exception:
+        return RedirectResponse("/artists?msg=" + quote("画师ID必须为正整数"), status_code=303)
+
+    cleaned_name = artist_name.strip() or None
+    await db.block_artist(parsed_artist_id, cleaned_name)
+    return RedirectResponse("/artists?msg=" + quote(f"已添加屏蔽画师: {parsed_artist_id}"), status_code=303)
+
+
+@app.post("/artists/unblock")
+async def unblock_artist_web(artist_id: str = Form(...), _=Depends(require_auth)):
+    """Web 解除画师黑名单"""
+    try:
+        parsed_artist_id = int(artist_id.strip())
+        if parsed_artist_id <= 0:
+            raise ValueError("artist_id must be positive")
+    except Exception:
+        return RedirectResponse("/artists?msg=" + quote("画师ID必须为正整数"), status_code=303)
+
+    ok = await db.unblock_artist(parsed_artist_id)
+    if ok:
+        return RedirectResponse("/artists?msg=" + quote(f"已解除屏蔽画师: {parsed_artist_id}"), status_code=303)
+    return RedirectResponse("/artists?msg=" + quote(f"未找到画师ID: {parsed_artist_id}"), status_code=303)
 
 
 # ============ API 路由 ============

@@ -964,11 +964,16 @@ async def unblock_tag(tag: str) -> bool:
         manual_deleted = cursor.rowcount > 0
         
         # 2. 重置厌恶计数 (针对自动屏蔽)
-        cursor = await db.execute(
-            "UPDATE tag_feedback_stats SET dislike_count = 0 WHERE tag = ?",
-            (tag,)
-        )
-        stats_updated = cursor.rowcount > 0
+        stats_updated = False
+        try:
+            cursor = await db.execute(
+                "UPDATE tag_feedback_stats SET dislike_count = 0 WHERE tag = ?",
+                (tag,)
+            )
+            stats_updated = cursor.rowcount > 0
+        except Exception:
+            # 兼容未创建 tag_feedback_stats 表的部署
+            stats_updated = False
         
         await db.commit()
         return manual_deleted or stats_updated
