@@ -122,75 +122,84 @@ class AIScorer:
             logger.debug(f"候选数量 {len(candidates)} 超过阈值 {self.max_candidates}，跳过 AI 评分")
             return {}
         
-        try:
-            # 构建 Prompt
-            top_tags = [t for t, _ in sorted(xp_profile.items(), key=lambda x: x[1], reverse=True)[:10]]
-            
-            # 构建候选列表描述
-            candidate_lines = []
-            for illust in candidates:
-                tags_str = ", ".join(illust.tags[:8])  # 只取前 8 个标签
-                candidate_lines.append(f"- ID: {illust.id}, Tags: [{tags_str}]")
-            
-            prompt = self.PROMPT_TEMPLATE.format(
-                top_tags=", ".join(top_tags),
-                recent_likes=", ".join(recent_likes[:5]) if recent_likes else "无",
-                recent_dislikes=", ".join(recent_dislikes[:5]) if recent_dislikes else "无",
-                candidates="\n".join(candidate_lines)
-            )
-            
-            # 调用 LLM
-            response = await self._client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=1000,
-                stream=True
-            )
-            
-            logger.info(f"AI 响应对象类型: {type(response)}")
-            logger.info(f"AI 响应原始内容: {response}")
-            
-            # 兼容流式与非流式返回：判断返回对象是否为异步迭代器
-            if hasattr(response, "__aiter__"):
-                # 流式返回：逐块拼接内容
-                full_content = ""
-                async for chunk in response:
-                    delta = chunk.choices[0].delta
-                    if delta.content:
-                        full_content += delta.content
-                content = full_content.strip()
-            else:
-                # 非流式返回：直接提取完整内容
-                content = response.choices[0].message.content.strip()
-            
-            logger.info(f"AI 返回结果: {content}")
-            
-            # 解析 JSON
-            # 尝试提取 JSON 数组
-            if "```" in content:
-                # 去除 markdown 代码块
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
-                content = content.strip()
-            
-            scores = json.loads(content)
-            
-            # 转换为字典
-            result = {}
-            for item in scores:
-                illust_id = item.get("id")
-                score = item.get("score", 0.5)
-                if illust_id:
-                    result[illust_id] = max(0.0, min(1.0, float(score)))
-            
-            logger.info(f"AI 评分完成: {len(result)}/{len(candidates)} 个作品")
-            return result
-            
-        except Exception as e:
-            logger.error(f"AI 评分失败: {e}")
-            return {}
+        max_retries = 3
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                # 构建 Prompt
+                top_tags = [t for t, _ in sorted(xp_profile.items(), key=lambda x: x[1], reverse=True)[:10]]
+
+                # 构建候选列表描述
+                candidate_lines = []
+                for illust in candidates:
+                    tags_str = ", ".join(illust.tags[:8])  # 只取前 8 个标签
+                    candidate_lines.append(f"- ID: {illust.id}, Tags: [{tags_str}]")
+
+                prompt = self.PROMPT_TEMPLATE.format(
+                    top_tags=", ".join(top_tags),
+                    recent_likes=", ".join(recent_likes[:5]) if recent_likes else "无",
+                    recent_dislikes=", ".join(recent_dislikes[:5]) if recent_dislikes else "无",
+                    candidates="\n".join(candidate_lines)
+                )
+
+                # 调用 LLM
+                response = await self._client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=1000,
+                    stream=True
+                )
+
+                logger.info(f"AI 响应对象类型: {type(response)}")
+                logger.info(f"AI 响应原始内容: {response}")
+
+                # 兼容流式与非流式返回：判断返回对象是否为异步迭代器
+                if hasattr(response, "__aiter__"):
+                    # 流式返回：逐块拼接内容
+                    full_content = ""
+                    async for chunk in response:
+                        delta = chunk.choices[0].delta
+                        if delta.content:
+                            full_content += delta.content
+                    content = full_content.strip()
+                else:
+                    # 非流式返回：直接提取完整内容
+                    content = response.choices[0].message.content.strip()
+
+                logger.info(f"AI 返回结果: {content}")
+
+                # 解析 JSON
+                # 尝试提取 JSON 数组
+                if "```" in content:
+                    # 去除 markdown 代码块
+                    content = content.split("```")[1]
+                    if content.startswith("json"):
+                        content = content[4:]
+                    content = content.strip()
+
+                scores = json.loads(content)
+
+                # 转换为字典
+                result = {}
+                for item in scores:
+                    illust_id = item.get("id")
+                    score = item.get("score", 0.5)
+                    if illust_id:
+                        result[illust_id] = max(0.0, min(1.0, float(score)))
+
+                logger.info(f"AI 评分完成: {len(result)}/{len(candidates)} 个作品")
+                return result
+
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    logger.warning(f"AI 评分失败，准备重试 ({attempt}/{max_retries}): {e}")
+                    await asyncio.sleep(float(attempt))
+                else:
+                    logger.error(f"AI 评分最终失败 (已重试 {max_retries} 次): {last_error}")
+
+        return {}
     
     def blend_scores(
         self,
