@@ -193,9 +193,6 @@ notifier:
       - 12345678
     # 话题 ID (可选，用于 Supergroup 话题)
     thread_id: null
-    # 代理地址 (可选)
-    proxy_url: null
-
     # 图片压缩配置
     image_quality: 85 # JPEG 压缩质量 (50-100)
     max_image_size: 2000 # 图片最大边长 (px)
@@ -239,6 +236,8 @@ feedback:
   related_push_limit: 1 # 每次反馈触发关联推送的数量
 
 network:
+  # 全局代理地址，供 Pixiv、推送器和 Web 画廊共用（可选）
+  proxy_url: null # 例如 http://127.0.0.1:7890
   max_concurrency: 5
   random_delay: [1.0, 3.0]
   requests_per_minute: 60

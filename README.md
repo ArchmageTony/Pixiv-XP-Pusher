@@ -218,7 +218,7 @@ notifier:
 
 - **Dashboard**: 查看 XP 画像词云、近期推送统计。
 - **Gallery**: 浏览推送历史，提供无限滚动画廊。
-  - **画廊代理**: 内置本地反代服务，**无需梯子**即可在画廊中浏览 Pixiv 图片（需配置 `proxy_url`）。
+  - **画廊代理**: 内置本地反代服务，**无需梯子**即可在画廊中浏览 Pixiv 图片（需配置 `network.proxy_url`）。
 - **设置**: 首次访问需设置管理密码，之后凭密码登录。
 
 ---
@@ -320,10 +320,12 @@ notifier:
       - "-1001234567890" # 你的群组 ID（或个人 Chat ID）
     allowed_users:
       - "987654321" # 你的 User ID（用于权限控制）
-    proxy_url: "http://127.0.0.1:7890" # 代理地址（国内必填！）
+
+network:
+  proxy_url: "http://127.0.0.1:7890" # 全局代理地址（国内推荐配置）
 ```
 
-> **🔴 国内用户必看：** `proxy_url` 必须填写你的代理软件地址，否则 Bot 无法连接 Telegram！
+> **🔴 国内用户必看：** `network.proxy_url` 供 Pixiv、Telegram、OneBot 和 Web 画廊共用。旧版 `notifier.telegram.proxy_url` 配置仍然兼容。
 
 #### 3.5 (可选) 配置 OneBot (QQ)
 
@@ -448,7 +450,7 @@ Bot 启动后，在 Telegram 聊天框输入 `/` 可看到所有指令：
 **解决：** 在 `config.yaml` 中配置代理：
 
 ```yaml
-telegram:
+network:
   proxy_url: "http://127.0.0.1:7890" # 改成你的代理地址
 ```
 
@@ -519,7 +521,7 @@ MIT License
 git pull
 
 # 重新构建并启动 / Rebuild and start
-docker-compose up -d --build
+docker compose up -d --build
 
 # 访问 Web UI / Access Web UI
 # http://VPS_IP:8000

@@ -5,6 +5,8 @@ OneBot 协议推送实现
 import asyncio
 import logging
 import json
+import uuid
+import urllib.request
 from typing import Callable, Optional
 
 import aiohttp
@@ -33,7 +35,8 @@ class OneBotNotifier(BaseNotifier):
         on_feedback: Optional[Callable] = None,
         on_action: Optional[Callable] = None,
         client: Optional['PixivClient'] = None,
-        max_pages: int = 10
+        max_pages: int = 10,
+        proxy_url: str | None = None
     ):
         self.ws_url = ws_url
         self.client = client
@@ -49,8 +52,13 @@ class OneBotNotifier(BaseNotifier):
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
+        self._pending_requests: dict[str, asyncio.Future] = {}
         self._message_illust_map: dict[int, int] = {}
         self._last_illust_id: int | None = None
+        if not proxy_url:
+            proxies = urllib.request.getproxies()
+            proxy_url = proxies.get("https") or proxies.get("http")
+        self.proxy_url = proxy_url
         
         # 日志
         targets = []
@@ -90,28 +98,14 @@ class OneBotNotifier(BaseNotifier):
         tasks = [self._prepare_illust_content(ill) for ill in illusts]
         prepared_data = await asyncio.gather(*tasks)
         
-        # 尝试使用合并转发消息
-        nodes = []
-        for content in prepared_data:
-            nodes.append(self._create_node(content))
-        
-        try:
-            await self._send_forward(nodes)
-            # 如果合并转发成功，所有作品都算成功
-            success_ids = [i.id for i in illusts]
-            logger.info(f"OneBot 合并转发成功 ({len(illusts)} 条)")
-        except Exception as e:
-            logger.error(f"合并转发失败: {e}")
-            logger.info("降级为逐条发送...")
-            
-            # Fallback: 逐条发送
-            for ill, content in zip(illusts, prepared_data):
-                try:
-                    await self._send_message(content)
-                    success_ids.append(ill.id)
-                    await asyncio.sleep(2)
-                except Exception as e2:
-                    logger.error(f"发送作品 {ill.id} 失败: {e2}")
+        # 标准私聊/群聊消息在 OneBot 实现中兼容性更好，且可取得明确回执。
+        for ill, content in zip(illusts, prepared_data):
+            try:
+                await self._send_message(content)
+                success_ids.append(ill.id)
+                await asyncio.sleep(2)
+            except Exception as exc:
+                logger.error(f"发送作品 {ill.id} 失败: {exc}")
         
         return success_ids
     
@@ -164,7 +158,9 @@ class OneBotNotifier(BaseNotifier):
             async def download_and_encode(url: str) -> str | None:
                 try:
                     from utils import download_image_with_referer
-                    image_data = await download_image_with_referer(self._session, url)
+                    image_data = await download_image_with_referer(
+                        self._session, url, proxy=self.proxy_url
+                    )
                     
                     import io
                     from PIL import Image
@@ -285,14 +281,48 @@ class OneBotNotifier(BaseNotifier):
             action = "send_private_msg" if t_type == "private" else "send_group_msg"
             id_field = "user_id" if t_type == "private" else "group_id"
             
-            payload = {
+            response = await self._call_api({
                 "action": action,
                 "params": {
                     id_field: t_id,
                     "message": content
                 }
-            }
-            await self._ws.send_json(payload)
+            })
+            if response.get("status") != "ok":
+                raise RuntimeError(response.get("wording") or response.get("message") or "OneBot 请求失败")
+            message_id = (response.get("data") or {}).get("message_id")
+            logger.info(f"OneBot {t_type} 消息已确认发送 (message_id={message_id})")
+
+    async def _call_api(self, payload: dict, timeout: float = 30) -> dict:
+        """调用 OneBot API 并等待同一 echo 的响应。"""
+        if not self._ws:
+            await self.connect()
+
+        echo = str(uuid.uuid4())
+        future = asyncio.get_running_loop().create_future()
+        self._pending_requests[echo] = future
+        payload["echo"] = echo
+        await self._ws.send_json(payload)
+        try:
+            if self._running:
+                return await asyncio.wait_for(future, timeout)
+
+            while not future.done():
+                msg = await self._ws.receive(timeout=timeout)
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    raise RuntimeError(f"OneBot 连接异常: {msg.type}")
+                self._handle_ws_data(json.loads(msg.data))
+            return future.result()
+        finally:
+            self._pending_requests.pop(echo, None)
+
+    def _handle_ws_data(self, data: dict):
+        echo = data.get("echo")
+        future = self._pending_requests.get(echo)
+        if future and not future.done():
+            future.set_result(data)
+            return
+        asyncio.create_task(self._process_message(data))
     
     async def _send_forward(self, nodes: list[dict]):
         """发送合并转发消息到所有配置目标"""
@@ -353,7 +383,7 @@ class OneBotNotifier(BaseNotifier):
                 msg = await self._ws.receive()
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
-                    await self._process_message(data)
+                    self._handle_ws_data(data)
                 elif msg.type == aiohttp.WSMsgType.CLOSED:
                     break
             except Exception as e:

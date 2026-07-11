@@ -11,7 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 # Ensure project root in path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from config import load_config, CONFIG_PATH
+from config import load_config, get_proxy_url, CONFIG_PATH
 from database import init_db, cache_illust, get_cached_illust_tags, get_cached_illust, mark_pushed
 from pixiv_client import PixivClient
 from profiler import XPProfiler
@@ -64,6 +64,7 @@ async def setup_notifiers(config: dict, client: PixivClient, profiler: XPProfile
     if sync_client is None:
         sync_client = client
     notifier_cfg = config.get("notifier", {})
+    proxy_url = get_proxy_url(config)
     # 支持单个 type 字符串或 types 列表
     notifier_types = notifier_cfg.get("types") or [notifier_cfg.get("type", "telegram")]
     if isinstance(notifier_types, str):
@@ -387,7 +388,7 @@ async def setup_notifiers(config: dict, client: PixivClient, profiler: XPProfile
                 thread_id=tg_cfg.get("thread_id"),
                 on_feedback=on_feedback,
                 on_action=on_action,
-                proxy_url=tg_cfg.get("proxy_url"),
+                proxy_url=proxy_url,
                 max_pages=max_pages,
                 image_quality=tg_cfg.get("image_quality", 85),
                 max_image_size=tg_cfg.get("max_image_size", 2000),
@@ -414,7 +415,8 @@ async def setup_notifiers(config: dict, client: PixivClient, profiler: XPProfile
                 on_feedback=on_feedback,
                 on_action=on_action,
                 client=client,
-                max_pages=max_pages
+                max_pages=max_pages,
+                proxy_url=proxy_url
             )
             try:
                 await ob_notifier.connect()
@@ -454,7 +456,7 @@ async def setup_services(config: dict):
     # 公共网络配置
     network_cfg = config.get("network", {})
     pixiv_cfg = config.get("pixiv", {})
-    proxy_url = config.get("notifier", {}).get("telegram", {}).get("proxy_url")
+    proxy_url = get_proxy_url(config)
     
     client_kwargs = {
         "requests_per_minute": network_cfg.get("requests_per_minute", 60),
