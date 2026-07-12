@@ -404,26 +404,35 @@ async def setup_notifiers(config: dict, client: PixivClient, profiler: XPProfile
     
     if "onebot" in notifier_types:
         ob_cfg = notifier_cfg.get("onebot", {})
-        if ob_cfg.get("ws_url"):
-            ob_notifier = OneBotNotifier(
-                ws_url=ob_cfg["ws_url"],
-                private_id=ob_cfg.get("private_id"),
-                group_id=ob_cfg.get("group_id"),
-                push_to_private=ob_cfg.get("push_to_private", True),
-                push_to_group=ob_cfg.get("push_to_group", False),
-                master_id=ob_cfg.get("master_id"),
-                on_feedback=on_feedback,
-                on_action=on_action,
-                client=client,
-                max_pages=max_pages,
-                proxy_url=proxy_url
-            )
+        ob_mode = str(ob_cfg.get("mode", "forward")).lower().strip()
+        if ob_mode == "reverse" or ob_cfg.get("ws_url"):
+            ob_notifier = None
             try:
-                await ob_notifier.connect()
+                ob_notifier = OneBotNotifier(
+                    ws_url=ob_cfg.get("ws_url"),
+                    mode=ob_mode,
+                    reverse_config=ob_cfg.get("reverse"),
+                    private_id=ob_cfg.get("private_id"),
+                    group_id=ob_cfg.get("group_id"),
+                    push_to_private=ob_cfg.get("push_to_private", True),
+                    push_to_group=ob_cfg.get("push_to_group", False),
+                    master_id=ob_cfg.get("master_id"),
+                    on_feedback=on_feedback,
+                    on_action=on_action,
+                    client=client,
+                    max_pages=max_pages,
+                    proxy_url=proxy_url
+                )
+                if ob_mode == "reverse":
+                    await ob_notifier.start_reverse_server()
+                else:
+                    await ob_notifier.connect()
                 notifiers.append(ob_notifier)
-                logger.info("已启用 OneBot 推送")
+                logger.info(f"已启用 OneBot 推送 ({ob_mode})")
             except Exception as e:
                 logger.error(f"OneBot 连接失败: {e}")
+                if ob_notifier:
+                    await ob_notifier.close()
     
     if "astrbot" in notifier_types:
         ab_cfg = notifier_cfg.get("astrbot", {})

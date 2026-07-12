@@ -20,7 +20,7 @@ case "$ACTION" in
     
     echo "🚀 构建镜像并启动服务..."
     
-    # 由于 Dockerfile CMD 已包含 --now，容器启动后会自动先跑一次
+    # Dockerfile 启动调度器，按 config.yaml 中的 cron 执行
     "${COMPOSE_CMD[@]}" up -d --build
     
     echo "✅ 启动完成！"

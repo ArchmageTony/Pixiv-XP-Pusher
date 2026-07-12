@@ -1,0 +1,15 @@
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+venv/
+config.yaml
+.initialized
+data/
+logs/
+pixiv_tokens.json
+*.log
+x-algorithm-main/

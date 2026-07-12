@@ -184,6 +184,7 @@ notifier:
     chat_ids: [123456789]
 
   onebot:
+    mode: forward
     ws_url: "ws://127.0.0.1:3001"
     private_id: 12345678
 
@@ -347,6 +348,47 @@ notifier:
 ```
 
 OneBot 支持与 Telegram 相同的指令：`/push`, `/xp`, `/stats`, `/block`, `/unblock`, `/schedule`, `/help`
+
+##### 云端项目连接本地 OneBot（反向 WebSocket）
+
+项目部署在云端、Lagrange.OneBot 运行在本地时，推荐让 Lagrange 主动连接云端：
+
+```yaml
+notifier:
+  types:
+    - onebot
+  onebot:
+    mode: reverse
+    reverse:
+      host: 0.0.0.0
+      port: 8765
+      path: /onebot/v11/ws
+      access_token: "请替换为随机密钥"
+      connection_timeout: 30
+    private_id: 12345678
+    push_to_private: true
+    master_id: 12345678
+```
+
+Lagrange.OneBot 对应配置：
+
+```json
+{
+  "Type": "ReverseWebSocket",
+  "Host": "你的域名",
+  "Port": 443,
+  "Suffix": "/onebot/v11/ws",
+  "ReconnectInterval": 5000,
+  "HeartBeatInterval": 5000,
+  "HeartBeatEnable": true,
+  "AccessToken": "与云端相同的随机密钥"
+}
+```
+
+容器内部提供普通 WebSocket 服务；请将域名的
+`wss://你的域名/onebot/v11/ws` 反向代理到容器的 `8765` 端口并在反向代理处终止 SSL。
+反向模式只允许一个 Lagrange 实例在线，新连接会替换旧连接。原有 `mode: forward`
+与 `ws_url` 配置继续兼容。
 
 #### 3.6 (可选) 配置 AstrBot [实验性]
 

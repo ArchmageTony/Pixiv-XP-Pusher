@@ -207,7 +207,16 @@ notifier:
 
   # OneBot / QQ
   onebot:
+    # forward: 项目主动连接本地 OneBot；reverse: 本地 OneBot 主动连接本项目
+    mode: "forward"
     ws_url: "ws://127.0.0.1:3001"
+    # 云端部署推荐使用反向模式。启用时必须设置非空 access_token。
+    reverse:
+      host: "0.0.0.0"
+      port: 8765
+      path: "/onebot/v11/ws"
+      access_token: "CHANGE_TO_A_RANDOM_SECRET"
+      connection_timeout: 30
     private_id: 12345678 # 私聊目标 QQ
     group_id: null # 群聊目标群号
     push_to_private: true

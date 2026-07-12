@@ -3,6 +3,7 @@ OneBot 协议推送实现
 兼容 go-cqhttp, Lagrange 等
 """
 import asyncio
+import hmac
 import logging
 import json
 import uuid
@@ -10,6 +11,7 @@ import urllib.request
 from typing import Callable, Optional
 
 import aiohttp
+from aiohttp import web
 
 from .base import BaseNotifier
 from pixiv_client import Illust
@@ -20,11 +22,13 @@ logger = logging.getLogger(__name__)
 
 
 class OneBotNotifier(BaseNotifier):
-    """OneBot v11 协议推送（链接模式）"""
+    """OneBot v11 协议推送（支持正向与反向 WebSocket）。"""
     
     def __init__(
         self,
-        ws_url: str,
+        ws_url: str | None = None,
+        mode: str = "forward",
+        reverse_config: dict | None = None,
         # 推送目标配置
         private_id: str | None = None,    # 私聊推送目标 QQ
         group_id: str | None = None,       # 群聊推送目标群号
@@ -38,7 +42,25 @@ class OneBotNotifier(BaseNotifier):
         max_pages: int = 10,
         proxy_url: str | None = None
     ):
+        self.mode = mode.lower().strip()
+        if self.mode not in ("forward", "reverse"):
+            raise ValueError("OneBot mode 必须是 forward 或 reverse")
+
         self.ws_url = ws_url
+        if self.mode == "forward" and not self.ws_url:
+            raise ValueError("OneBot 正向模式必须配置 ws_url")
+
+        reverse_config = reverse_config or {}
+        self.reverse_host = str(reverse_config.get("host", "0.0.0.0"))
+        self.reverse_port = int(reverse_config.get("port", 8765))
+        self.reverse_path = str(reverse_config.get("path", "/onebot/v11/ws"))
+        if not self.reverse_path.startswith("/"):
+            self.reverse_path = f"/{self.reverse_path}"
+        self.access_token = str(reverse_config.get("access_token", ""))
+        self.connection_timeout = float(reverse_config.get("connection_timeout", 30))
+        if self.mode == "reverse" and not self.access_token:
+            raise ValueError("OneBot 反向模式必须配置 access_token")
+
         self.client = client
         self.private_id = int(private_id) if private_id else None
         self.group_id = int(group_id) if group_id else None
@@ -49,10 +71,15 @@ class OneBotNotifier(BaseNotifier):
         self.on_action = on_action
         self.max_pages = max_pages
         
-        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._ws: Optional[aiohttp.ClientWebSocketResponse | web.WebSocketResponse] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
         self._pending_requests: dict[str, asyncio.Future] = {}
+        self._connection_ready = asyncio.Event()
+        self._send_lock = asyncio.Lock()
+        self._runner: web.AppRunner | None = None
+        self._site: web.TCPSite | None = None
+        self._server_start_lock = asyncio.Lock()
         self._message_illust_map: dict[int, int] = {}
         self._last_illust_id: int | None = None
         if not proxy_url:
@@ -69,19 +96,111 @@ class OneBotNotifier(BaseNotifier):
         logger.info(f"OneBot 推送目标: {', '.join(targets) or '无'}")
         if self.master_id:
             logger.info(f"主人 QQ: {self.master_id}")
+        logger.info(f"OneBot 连接模式: {self.mode}")
     
     async def connect(self):
         """连接WebSocket"""
+        if self.mode == "reverse":
+            await self.start_reverse_server()
+            await self._wait_for_connection()
+            return
+
+        if self._ws and not self._ws.closed:
+            return
+        if self._session and not self._session.closed:
+            await self._session.close()
         self._session = aiohttp.ClientSession()
         self._ws = await self._session.ws_connect(self.ws_url)
+        self._connection_ready.set()
         logger.info(f"已连接到 OneBot: {self.ws_url}")
-    
-    async def close(self):
-        """关闭连接"""
-        if self._ws:
-            await self._ws.close()
-        if self._session:
-            await self._session.close()
+
+    async def start_reverse_server(self):
+        """启动反向 WebSocket 监听服务（幂等）。"""
+        if self.mode != "reverse" or self._runner is not None:
+            return
+
+        async with self._server_start_lock:
+            if self._runner is not None:
+                return
+            app = web.Application()
+            app.router.add_get(self.reverse_path, self._handle_reverse_websocket)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, self.reverse_host, self.reverse_port)
+            try:
+                await site.start()
+            except Exception:
+                await runner.cleanup()
+                raise
+            self._runner = runner
+            self._site = site
+            logger.info(
+                f"OneBot 反向 WebSocket 已监听: "
+                f"ws://{self.reverse_host}:{self.reverse_port}{self.reverse_path}"
+            )
+
+    def _is_authorized(self, request: web.Request) -> bool:
+        authorization = request.headers.get("Authorization", "")
+        bearer = ""
+        if authorization.lower().startswith("bearer "):
+            bearer = authorization[7:].strip()
+        supplied = bearer or request.query.get("access_token", "")
+        return bool(supplied) and hmac.compare_digest(supplied, self.access_token)
+
+    async def _handle_reverse_websocket(self, request: web.Request):
+        if not self._is_authorized(request):
+            logger.warning("拒绝未经授权的 OneBot 反向 WebSocket 连接")
+            raise web.HTTPUnauthorized(text="Invalid OneBot access token")
+
+        ws = web.WebSocketResponse(heartbeat=30)
+        await ws.prepare(request)
+
+        old_ws = self._ws
+        if old_ws and old_ws is not ws and not old_ws.closed:
+            self._fail_pending_requests(ConnectionError("OneBot 连接已被新连接替换"))
+            await old_ws.close(code=1000, message=b"Replaced by a new connection")
+
+        self._ws = ws
+        self._running = True
+        self._connection_ready.set()
+        logger.info("OneBot 反向 WebSocket 已连接")
+
+        try:
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        self._handle_ws_data(json.loads(msg.data))
+                    except json.JSONDecodeError:
+                        logger.warning("收到无效的 OneBot JSON 数据")
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    logger.warning(f"OneBot 反向 WebSocket 错误: {ws.exception()}")
+        finally:
+            if self._ws is ws:
+                self._ws = None
+                self._running = False
+                self._connection_ready.clear()
+                self._fail_pending_requests(ConnectionError("OneBot 反向 WebSocket 已断开"))
+                logger.warning("OneBot 反向 WebSocket 已断开，等待本地客户端重连")
+        return ws
+
+    async def _wait_for_connection(self):
+        if self._ws and not self._ws.closed:
+            return
+        try:
+            await asyncio.wait_for(
+                self._connection_ready.wait(), timeout=self.connection_timeout
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"等待 OneBot 反向连接超时 ({self.connection_timeout:g}s)"
+            ) from exc
+        if not self._ws or self._ws.closed:
+            raise ConnectionError("OneBot 反向连接不可用")
+
+    def _fail_pending_requests(self, exc: Exception):
+        for future in list(self._pending_requests.values()):
+            if not future.done():
+                future.set_exception(type(exc)(str(exc)))
     
     async def send(self, illusts: list[Illust]) -> list[int]:
         """发送推送"""
@@ -98,7 +217,19 @@ class OneBotNotifier(BaseNotifier):
         tasks = [self._prepare_illust_content(ill) for ill in illusts]
         prepared_data = await asyncio.gather(*tasks)
         
-        # 标准私聊/群聊消息在 OneBot 实现中兼容性更好，且可取得明确回执。
+        # 多个作品优先使用 OneBot 合并转发，避免连续发送大量单独消息。
+        if len(illusts) > 1:
+            nodes = [self._create_node(content) for content in prepared_data]
+            try:
+                await self._send_forward(nodes)
+                success_ids = [ill.id for ill in illusts]
+                logger.info(f"OneBot 合并转发成功 ({len(illusts)} 条)")
+                return success_ids
+            except Exception as exc:
+                logger.error(f"OneBot 合并转发失败: {exc}")
+                logger.info("降级为逐条发送...")
+
+        # 单个作品直接发送；合并转发失败时也走这里兜底。
         for ill, content in zip(illusts, prepared_data):
             try:
                 await self._send_message(content)
@@ -222,6 +353,56 @@ class OneBotNotifier(BaseNotifier):
     async def _send_single(self, illust: Illust):
         """发送单条消息 (已弃用，逻辑合并到 send)"""
         pass
+
+    async def push_illusts(
+        self,
+        illusts: list[Illust],
+        message_prefix: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> dict[int, int]:
+        """发送连锁推荐，并返回作品 ID 到 OneBot 消息 ID 的映射。"""
+        if not illusts:
+            return {}
+
+        if not self._ws:
+            await self.connect()
+
+        result_map: dict[int, int] = {}
+        for illust in illusts:
+            try:
+                content = await self._prepare_illust_content(illust)
+                if message_prefix:
+                    content = f"{message_prefix}\n\n{content}"
+
+                # 只有确定父消息属于当前 OneBot 实例时才引用，避免把 Telegram
+                # 或其他推送器的消息 ID 误当作 QQ 消息 ID。
+                if (
+                    reply_to_message_id is not None
+                    and reply_to_message_id in self._message_illust_map
+                ):
+                    content = f"[CQ:reply,id={reply_to_message_id}]{content}"
+
+                message_ids = await self._send_message(content)
+                if message_ids:
+                    message_id = message_ids[0]
+                    result_map[illust.id] = message_id
+                    for sent_id in message_ids:
+                        self._message_illust_map[sent_id] = illust.id
+                    logger.info(
+                        f"OneBot 连锁推送成功: {illust.id} -> msg_id={message_id}"
+                    )
+            except Exception as exc:
+                logger.error(f"OneBot 连锁推送作品 {illust.id} 失败: {exc}")
+
+            await asyncio.sleep(1)
+
+        # 限制内存映射大小。
+        if len(self._message_illust_map) > 200:
+            oldest_keys = list(self._message_illust_map)[:100]
+            for key in oldest_keys:
+                del self._message_illust_map[key]
+
+        return result_map
     
     def format_message(self, illust: Illust, image_cq: str = None) -> str:
         """格式化消息"""
@@ -277,6 +458,7 @@ class OneBotNotifier(BaseNotifier):
             if self.push_to_group:
                 targets.append(("group", self.group_id))
         
+        message_ids = []
         for t_type, t_id in targets:
             action = "send_private_msg" if t_type == "private" else "send_group_msg"
             id_field = "user_id" if t_type == "private" else "group_id"
@@ -292,18 +474,29 @@ class OneBotNotifier(BaseNotifier):
                 raise RuntimeError(response.get("wording") or response.get("message") or "OneBot 请求失败")
             message_id = (response.get("data") or {}).get("message_id")
             logger.info(f"OneBot {t_type} 消息已确认发送 (message_id={message_id})")
+            if message_id is not None:
+                message_ids.append(message_id)
+
+        return message_ids
 
     async def _call_api(self, payload: dict, timeout: float = 30) -> dict:
         """调用 OneBot API 并等待同一 echo 的响应。"""
-        if not self._ws:
+        if self.mode == "reverse":
+            await self.start_reverse_server()
+            await self._wait_for_connection()
+        elif not self._ws or self._ws.closed:
             await self.connect()
 
         echo = str(uuid.uuid4())
         future = asyncio.get_running_loop().create_future()
         self._pending_requests[echo] = future
         payload["echo"] = echo
-        await self._ws.send_json(payload)
         try:
+            async with self._send_lock:
+                if not self._ws or self._ws.closed:
+                    raise ConnectionError("OneBot WebSocket 连接不可用")
+                await self._ws.send_json(payload)
+
             if self._running:
                 return await asyncio.wait_for(future, timeout)
 
@@ -336,14 +529,24 @@ class OneBotNotifier(BaseNotifier):
             action = "send_private_forward_msg" if t_type == "private" else "send_group_forward_msg"
             id_field = "user_id" if t_type == "private" else "group_id"
             
-            payload = {
+            response = await self._call_api({
                 "action": action,
                 "params": {
                     id_field: t_id,
                     "messages": nodes
                 }
-            }
-            await self._ws.send_json(payload)
+            })
+            if response.get("status") != "ok":
+                raise RuntimeError(
+                    response.get("wording")
+                    or response.get("message")
+                    or "OneBot 合并转发请求失败"
+                )
+            message_id = (response.get("data") or {}).get("message_id")
+            logger.info(
+                f"OneBot {t_type} 合并转发已确认发送 "
+                f"(message_id={message_id}, nodes={len(nodes)})"
+            )
     
     def _create_node(self, content: str) -> dict:
         """创建转发节点"""
@@ -358,11 +561,21 @@ class OneBotNotifier(BaseNotifier):
     
     async def close(self):
         """关闭连接"""
-        if self._session:
-            await self._session.close()
+        self._running = False
+        self._connection_ready.clear()
+        self._fail_pending_requests(ConnectionError("OneBot 通知器正在关闭"))
         if self._ws:
             await self._ws.close()
-        self._running = False
+            self._ws = None
+        if self._site:
+            await self._site.stop()
+            self._site = None
+        if self._runner:
+            await self._runner.cleanup()
+            self._runner = None
+        if self._session:
+            await self._session.close()
+            self._session = None
 
     
     async def handle_feedback(self, illust_id: int, action: str) -> bool:
@@ -373,7 +586,11 @@ class OneBotNotifier(BaseNotifier):
     
     async def start_listening(self):
         """监听消息（用于反馈处理）"""
-        if not self._ws:
+        if self.mode == "reverse":
+            await self.start_reverse_server()
+            return
+
+        if not self._ws or self._ws.closed:
             await self.connect()
         
         self._running = True
@@ -388,6 +605,14 @@ class OneBotNotifier(BaseNotifier):
                     break
             except Exception as e:
                 logger.error(f"消息处理错误: {e}")
+                break
+
+        self._running = False
+        self._connection_ready.clear()
+        self._fail_pending_requests(ConnectionError("OneBot 正向 WebSocket 已断开"))
+        if self._ws:
+            await self._ws.close()
+            self._ws = None
     
     async def _process_message(self, data: dict):
         """处理收到的消息"""

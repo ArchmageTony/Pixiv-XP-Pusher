@@ -17,12 +17,12 @@ RUN echo '#!/bin/bash\n\
 # 后台启动 Web UI\n\
 uvicorn web.app:app --host 0.0.0.0 --port 8000 &\n\
 \n\
-# 前台启动主程序（调度器模式）\n\
-exec python main.py --now' > /app/start.sh \
+# 前台启动主程序（仅按调度执行，容器重启时不立即推送）\n\
+exec python main.py' > /app/start.sh \
     && chmod +x /app/start.sh
 
-# 暴露 Web UI 端口
-EXPOSE 8000
+# 暴露 Web UI 与 OneBot 反向 WebSocket 端口
+EXPOSE 8000 8765
 
 # 启动所有服务
 CMD ["/bin/bash", "/app/start.sh"]
