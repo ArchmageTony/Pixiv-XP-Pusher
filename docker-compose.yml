@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   pixiv-xp:
     build: .
@@ -12,5 +10,6 @@ services:
       - ./config.yaml:/app/config.yaml # 去掉 :ro，允许 Web UI 写入配置
     ports:
       - "8000:8000" # 映射 Web UI 端口
+      - "8765:8765" # OneBot 反向 WebSocket（可由域名反向代理）
     environment:
       - TZ=Asia/Shanghai

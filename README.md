@@ -184,6 +184,7 @@ notifier:
     chat_ids: [123456789]
 
   onebot:
+    mode: forward
     ws_url: "ws://127.0.0.1:3001"
     private_id: 12345678
 
@@ -218,7 +219,7 @@ notifier:
 
 - **Dashboard**: 查看 XP 画像词云、近期推送统计。
 - **Gallery**: 浏览推送历史，提供无限滚动画廊。
-  - **画廊代理**: 内置本地反代服务，**无需梯子**即可在画廊中浏览 Pixiv 图片（需配置 `proxy_url`）。
+  - **画廊代理**: 内置本地反代服务，**无需梯子**即可在画廊中浏览 Pixiv 图片（需配置 `network.proxy_url`）。
 - **设置**: 首次访问需设置管理密码，之后凭密码登录。
 
 ---
@@ -320,10 +321,12 @@ notifier:
       - "-1001234567890" # 你的群组 ID（或个人 Chat ID）
     allowed_users:
       - "987654321" # 你的 User ID（用于权限控制）
-    proxy_url: "http://127.0.0.1:7890" # 代理地址（国内必填！）
+
+network:
+  proxy_url: "http://127.0.0.1:7890" # 全局代理地址（国内推荐配置）
 ```
 
-> **🔴 国内用户必看：** `proxy_url` 必须填写你的代理软件地址，否则 Bot 无法连接 Telegram！
+> **🔴 国内用户必看：** `network.proxy_url` 供 Pixiv、Telegram、OneBot 和 Web 画廊共用。旧版 `notifier.telegram.proxy_url` 配置仍然兼容。
 
 #### 3.5 (可选) 配置 OneBot (QQ)
 
@@ -345,6 +348,47 @@ notifier:
 ```
 
 OneBot 支持与 Telegram 相同的指令：`/push`, `/xp`, `/stats`, `/block`, `/unblock`, `/schedule`, `/help`
+
+##### 云端项目连接本地 OneBot（反向 WebSocket）
+
+项目部署在云端、Lagrange.OneBot 运行在本地时，推荐让 Lagrange 主动连接云端：
+
+```yaml
+notifier:
+  types:
+    - onebot
+  onebot:
+    mode: reverse
+    reverse:
+      host: 0.0.0.0
+      port: 8765
+      path: /onebot/v11/ws
+      access_token: "请替换为随机密钥"
+      connection_timeout: 30
+    private_id: 12345678
+    push_to_private: true
+    master_id: 12345678
+```
+
+Lagrange.OneBot 对应配置：
+
+```json
+{
+  "Type": "ReverseWebSocket",
+  "Host": "你的域名",
+  "Port": 443,
+  "Suffix": "/onebot/v11/ws",
+  "ReconnectInterval": 5000,
+  "HeartBeatInterval": 5000,
+  "HeartBeatEnable": true,
+  "AccessToken": "与云端相同的随机密钥"
+}
+```
+
+容器内部提供普通 WebSocket 服务；请将域名的
+`wss://你的域名/onebot/v11/ws` 反向代理到容器的 `8765` 端口并在反向代理处终止 SSL。
+反向模式只允许一个 Lagrange 实例在线，新连接会替换旧连接。原有 `mode: forward`
+与 `ws_url` 配置继续兼容。
 
 #### 3.6 (可选) 配置 AstrBot [实验性]
 
@@ -448,7 +492,7 @@ Bot 启动后，在 Telegram 聊天框输入 `/` 可看到所有指令：
 **解决：** 在 `config.yaml` 中配置代理：
 
 ```yaml
-telegram:
+network:
   proxy_url: "http://127.0.0.1:7890" # 改成你的代理地址
 ```
 
@@ -519,7 +563,7 @@ MIT License
 git pull
 
 # 重新构建并启动 / Rebuild and start
-docker-compose up -d --build
+docker compose up -d --build
 
 # 访问 Web UI / Access Web UI
 # http://VPS_IP:8000

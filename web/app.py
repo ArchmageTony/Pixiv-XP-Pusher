@@ -20,6 +20,7 @@ import aiohttp
 import yaml
 
 import database as db
+from config import get_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -383,10 +384,7 @@ async def proxy_image(illust_id: int):
     解决前端无法直接访问外网图床的问题
     """
     config = load_config()
-    # 复用 Telegram 配置的代理
-    proxy = config.get("notifier", {}).get("telegram", {}).get("proxy_url")
-    if proxy and not proxy.startswith("http"):
-        proxy = f"http://{proxy}"
+    proxy = get_proxy_url(config)
         
     urls = [
         f"https://pixiv.cat/{illust_id}.jpg",
