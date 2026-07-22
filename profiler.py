@@ -71,11 +71,15 @@ class AITagProcessor:
         else:
             self.client = None
         
-        # 缓存处理结果 (Tag -> CleanedTag/None)
+        # 缓存处理结果 (Tag -> CleanedTag/None); 仅成功结果写入
         self._cache: dict[str, str | None] = {}
         self._cache_initialized = False
-        # 记录发生的错误
+        # 本轮任务新增的错误 ID (调用方负责在任务开始/告警后清空)
         self.occurred_errors: list[int] = []
+
+    def clear_occurred_errors(self):
+        """清空本轮错误记录"""
+        self.occurred_errors.clear()
     
     def _preprocess_tags(self, tags: list[str]) -> list[str]:
         """正则预处理：去除 users入り 后缀等"""
@@ -91,6 +95,44 @@ class AITagProcessor:
                 processed.append(tag)
         return processed
 
+    async def _ensure_cache_loaded(self):
+        """首次运行时加载 DB 缓存"""
+        if self._cache_initialized:
+            return
+        try:
+            db_cache = await db.get_ai_cache_map()
+            self._cache.update(db_cache)
+            self._cache_initialized = True
+            logger.info(f"已加载 {len(db_cache)} 条 AI 标签缓存")
+        except Exception as e:
+            logger.error(f"加载 AI 缓存失败: {e}")
+
+    def _apply_cache_results(
+        self, tags: list[str], effective_tags: list[str]
+    ) -> tuple[list[str], dict[str, str]]:
+        """根据缓存构造有效标签; 未成功处理的 tag 运行时降级为原值, 不污染持久缓存语义"""
+        valid_tags = []
+        synonym_map = {}
+
+        for i, original_tag in enumerate(tags):
+            effective_tag = effective_tags[i]
+
+            if effective_tag not in self._cache:
+                # 本批失败或尚未处理: 仅本轮降级, 不写 cache
+                result = effective_tag
+            else:
+                result = self._cache[effective_tag]
+                if result is None:
+                    continue  # meaningless
+
+            if result != original_tag:
+                synonym_map[original_tag] = result
+
+            valid_tags.append(result)
+
+        valid_tags = list(dict.fromkeys(valid_tags))
+        return valid_tags, synonym_map
+
     async def process_tags(self, tags: list[str]) -> tuple[list[str], dict[str, str]]:
         if not self.enabled or not tags:
             return tags, {}
@@ -99,14 +141,7 @@ class AITagProcessor:
         effective_tags = self._preprocess_tags(tags)
         
         # 1. 首次运行时加载 DB 缓存
-        if not self._cache_initialized:
-            try:
-                db_cache = await db.get_ai_cache_map()
-                self._cache.update(db_cache)
-                self._cache_initialized = True
-                logger.info(f"已加载 {len(db_cache)} 条 AI 标签缓存")
-            except Exception as e:
-                logger.error(f"加载 AI 缓存失败: {e}")
+        await self._ensure_cache_loaded()
         
         # 2. 检查缺失 (使用预处理后的标签)
         uncached = [t for t in effective_tags if t not in self._cache]
@@ -117,29 +152,30 @@ class AITagProcessor:
             logger.info(f"发现 {len(uncached)} 个新 Tag，开始 AI 处理 ({self.batch_size}/批)...")
             await self._batch_process(uncached)
         
-        # 3. 应用结果
-        valid_tags = []
-        synonym_map = {}
-        
-        for i, original_tag in enumerate(tags):
-            effective_tag = effective_tags[i]
-            
-            # 安全获取结果
-            result = self._cache.get(effective_tag, effective_tag)
-            
-            if result is None:
-                continue # meaningless
-            
-            # 只要结果与原始标签不同，就记录映射
-            if result != original_tag:
-                synonym_map[original_tag] = result
-            
-            valid_tags.append(result)
-        
-        # 去重保持顺序
-        valid_tags = list(dict.fromkeys(valid_tags))
-        
-        return valid_tags, synonym_map
+        # 3. 应用结果 (失败 tag 不在 cache 中, 运行时降级为原值)
+        return self._apply_cache_results(tags, effective_tags)
+
+    async def reprocess_tags(self, tags: list[str]) -> bool:
+        """
+        强制重新 AI 处理指定标签 (绕过内存/语义上的“已处理”).
+        返回 True 表示全部成功并已写入 cache.
+        """
+        if not self.enabled:
+            return False
+        if not tags:
+            return True
+
+        effective_tags = self._preprocess_tags(tags)
+        await self._ensure_cache_loaded()
+
+        targets = list(dict.fromkeys(effective_tags))
+        for t in targets:
+            self._cache.pop(t, None)
+
+        logger.info(f"强制重试 AI 处理 {len(targets)} 个标签...")
+        ok = await self._batch_process(targets)
+        # 全部目标均已成功写入 cache 才算成功
+        return ok and all(t in self._cache for t in targets)
 
     @retry_async(max_retries=3, delay=2.0)
     async def _call_api(self, prompt: str) -> str:
@@ -159,13 +195,16 @@ class AITagProcessor:
         async for chunk in response:
             if chunk.choices and chunk.choices[0].delta.content:
                 collected_content.append(chunk.choices[0].delta.content)
-                
-        return "".join(collected_content)
 
-    async def _batch_process(self, tags: list[str]):
-        """并发批量处理Tag"""
+        content = "".join(collected_content)
+        if not content.strip():
+            raise ValueError("AI 返回空内容")
+        return content
+
+    async def _batch_process(self, tags: list[str]) -> bool:
+        """并发批量处理Tag. 返回是否全部批次成功."""
         if not tags:
-            return
+            return True
         
         batches = []
         for i in range(0, len(tags), self.batch_size):
@@ -174,16 +213,19 @@ class AITagProcessor:
         logger.info(f"队列共 {len(batches)} 个批次，并发数: {self.concurrency}")
         
         semaphore = asyncio.Semaphore(self.concurrency)
+        results: list[bool] = []
         
         async def _bounded_Process(batch):
             async with semaphore:
-                await self._process_single_batch(batch)
+                ok = await self._process_single_batch(batch)
+                results.append(ok)
                 
         tasks = [_bounded_Process(b) for b in batches]
         await asyncio.gather(*tasks)
+        return all(results) if results else True
 
-    async def _process_single_batch(self, tags: list[str]):
-        """处理单批次并持久化"""
+    async def _process_single_batch(self, tags: list[str]) -> bool:
+        """处理单批次并持久化. 成功返回 True; 失败不写入 cache."""
         prompt = self._build_prompt(tags)
         
         last_error = None
@@ -236,8 +278,7 @@ class AITagProcessor:
                 if synonyms:
                     logger.info(f"   🔄 归类 {len(synonyms)} 个标签")
                 
-                # 成功则直接返回
-                return
+                return True
 
             except Exception as e:
                 last_error = e
@@ -265,10 +306,9 @@ class AITagProcessor:
                 except Exception as db_e:
                     logger.error(f"记录错误日志失败: {db_e}")
             
-            # 失败时保留所有tags (Fallback)
-            for tag in tags:
-                self._cache[tag] = tag
-    
+            # 失败不写 cache, 以便后续/重试可再次请求 AI
+        return False
+
 from utils import TAG_TRANSLATIONS
 
 

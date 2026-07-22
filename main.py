@@ -305,29 +305,41 @@ async def setup_notifiers(config: dict, client: PixivClient, profiler: XPProfile
                 error_record = await get_ai_error(error_id)
                 if not error_record:
                     logger.error("错误记录不存在")
-                    return
-                
-                if error_record["status"] == "resolved":
-                    logger.info("该错误已修复")
+                    for n in notifiers:
+                        if hasattr(n, 'send_text'):
+                            await n.send_text(f"❌ 错误记录不存在 (id={error_id})")
+                            break
                     return
 
                 tags = json.loads(error_record["tags_content"])
                 
-                # 2. 重新尝试 AI 处理
-                logger.info(f"正在重试 AI 处理 {len(tags)} 个标签...")
-                valid, mapping = await profiler.ai_processor.process_tags(tags)
-                
-                await update_ai_error_status(error_id, "resolved")
-                
-                # 通知用户（使用第一个可用的 notifier）
-                msg = f"✅ 修复成功！\n已验证 AI 配置可用。\n({len(tags)} 个标签已正确处理)"
+                # 2. 强制重新 AI 处理 (绕过失败降级缓存; resolved 也允许再洗)
+                logger.info(f"正在强制重试 AI 处理 {len(tags)} 个标签 (status={error_record['status']})...")
+                ok = await profiler.ai_processor.reprocess_tags(tags)
+
+                if ok:
+                    await update_ai_error_status(error_id, "resolved")
+                    msg = f"✅ 修复成功！\n已重新完成 AI 清洗。\n({len(tags)} 个标签已写入缓存)"
+                    logger.info(f"重试成功: error_id={error_id}, tags={len(tags)}")
+                else:
+                    await update_ai_error_status(error_id, "pending")
+                    msg = f"❌ 重试失败\nerror_id={error_id}\n{len(tags)} 个标签仍未清洗成功, 请稍后或检查 AI 接口."
+                    logger.error(f"重试失败(AI未成功): error_id={error_id}")
+
                 for n in notifiers:
                     if hasattr(n, 'send_text'):
                         await n.send_text(msg)
                         break
                 
             except Exception as e:
-                logger.error(f"重试失败: {e}")
+                logger.error(f"重试失败: {e}", exc_info=True)
+                try:
+                    for n in notifiers:
+                        if hasattr(n, 'send_text'):
+                            await n.send_text(f"❌ 重试异常: {e}")
+                            break
+                except Exception:
+                    pass
         
         elif action == "run_task":
              # 手动触发推送任务
@@ -539,6 +551,10 @@ async def main_task(config: dict, client: PixivClient, profiler: XPProfiler, not
             logger.warning(f"Token 刷新失败: {e}")
     
     try:
+        # 清空上轮残留, 仅统计本轮 AI 失败
+        if hasattr(profiler, "ai_processor"):
+            profiler.ai_processor.clear_occurred_errors()
+
         # 1. 构建/更新 XP 画像
         profiler_cfg = config.get("profiler", {})
         
@@ -710,28 +726,34 @@ async def main_task(config: dict, client: PixivClient, profiler: XPProfiler, not
                     logger.info(f"推送完成: {len(all_sent_ids)}/{len(filtered)} 个作品成功")
                 else:
                     logger.error("没有任何作品被成功推送")
-                    
-                # 5. AI 错误报警
-                ai_errors = profiler.ai_processor.occurred_errors
-                if ai_errors:
-                    err_count = len(ai_errors)
-                    err_id = ai_errors[0]
-                    msg = f"⚠️ 警告：本次任务有 {err_count} 批 Tag AI 优化失败。\n已自动记录并降级处理。"
-                    buttons = [("🔄 重试修复", f"retry_ai:{err_id}")]
-                    logger.warning(f"AI 优化失败 {err_count} 次，发送警告")
-                    
-                    for notifier in notifiers:
-                        if hasattr(notifier, 'send_text'):
-                            try:
-                                await notifier.send_text(msg, buttons)
-                            except:
-                                pass
             except Exception as e:
                 logger.error(f"推送过程出错: {e}")
         elif not filtered:
              logger.info("无新作品可推送")
         else:
             logger.warning("未配置推送器")
+
+        # 5. AI 错误报警 (与是否推送无关; 仅本轮新增, 告警后清空)
+        if notifiers and hasattr(profiler, "ai_processor"):
+            ai_errors = list(profiler.ai_processor.occurred_errors)
+            if ai_errors:
+                err_count = len(ai_errors)
+                msg = (
+                    f"⚠️ 警告：本次任务有 {err_count} 批 Tag AI 优化失败。\n"
+                    f"已自动记录并降级处理 (未写入 AI 缓存, 可重试)."
+                )
+                buttons = [
+                    (f"🔄 重试#{eid}", f"retry_ai:{eid}")
+                    for eid in ai_errors[:5]
+                ]
+                logger.warning(f"AI 优化失败 {err_count} 次，发送警告 ids={ai_errors}")
+                for notifier in notifiers:
+                    if hasattr(notifier, "send_text"):
+                        try:
+                            await notifier.send_text(msg, buttons)
+                        except Exception:
+                            pass
+                profiler.ai_processor.clear_occurred_errors()
         
     except Exception as e:
         logger.error(f"任务执行出错: {e}", exc_info=True)
@@ -819,15 +841,17 @@ async def daily_report_task(config: dict, notifiers: list, profiler=None):
             uncached_tags = await get_uncached_tags(limit=200)
             if uncached_tags:
                 logger.info(f"发现 {len(uncached_tags)} 个未处理标签，启动 AI 清洗...")
-                
+
                 async def _ai_process():
-                    return await profiler.ai_processor.process_tags(uncached_tags)
-                
+                    ok = await profiler.ai_processor.reprocess_tags(uncached_tags)
+                    if not ok:
+                        raise RuntimeError("AI 清洗未全部成功")
+                    return ok
+
                 result = await retry_async(_ai_process, max_retries=3, delay=10.0)
                 if result:
-                    valid_tags, mapping = result
-                    maintenance_summary.append(f"🤖 AI 清洗 {len(uncached_tags)} 个标签 → {len(valid_tags)} 个有效")
-                    logger.info(f"AI 清洗完成: {len(valid_tags)}/{len(uncached_tags)} 有效")
+                    maintenance_summary.append(f"🤖 AI 清洗 {len(uncached_tags)} 个标签成功")
+                    logger.info(f"AI 清洗完成: {len(uncached_tags)} 个标签已写入缓存")
                 else:
                     maintenance_summary.append(f"⚠️ AI 清洗失败 (已重试)")
         except Exception as e:
